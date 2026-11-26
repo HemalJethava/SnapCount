@@ -2,13 +2,13 @@ import type { TfliteModel } from 'react-native-fast-tflite';
 import type { Image } from 'react-native-nitro-image';
 import { COCO_LABELS } from './labels';
 
-export const CONFIDENCE_THRESHOLD = 0.75;
+export const CONFIDENCE_THRESHOLD = 0.4;
 const IOU_THRESHOLD = 0.45;
 
 export type Detection = { label: string; confidence: number };
 
 /** Resize to the model input size and convert to a float32 RGB [0..1] buffer. */
-function toInputTensor(image: Image, size: number): ArrayBuffer {
+function toInputTensor(image: Image, size: number, chw: boolean): ArrayBuffer {
   const raw = image.resize(size, size).toRawPixelData();
   const px = new Uint8Array(raw.buffer);
   const fmt = raw.pixelFormat;
@@ -20,9 +20,15 @@ function toInputTensor(image: Image, size: number): ArrayBuffer {
   const out = new Float32Array(size * size * 3);
   for (let i = 0, o = 0; i < size * size; i++, o += 3) {
     const p = i * bpp;
-    out[o] = px[p + r] / 255;
-    out[o + 1] = px[p + g] / 255;
-    out[o + 2] = px[p + b] / 255;
+    if (chw) {
+      out[i] = px[p + r] / 255;
+      out[size * size + i] = px[p + g] / 255;
+      out[2 * size * size + i] = px[p + b] / 255;
+    } else {
+      out[o] = px[p + r] / 255;
+      out[o + 1] = px[p + g] / 255;
+      out[o + 2] = px[p + b] / 255;
+    }
   }
   return out.buffer;
 }
@@ -38,8 +44,10 @@ function iou(a: number[], b: number[]): number {
 }
 
 export async function detect(model: TfliteModel, image: Image): Promise<Detection[]> {
-  const size = model.inputs[0].shape[1]; // [1, H, W, 3]
-  const [output] = await model.run([toInputTensor(image, size)]);
+  const ishape = model.inputs[0].shape; // [1, H, W, 3] (NHWC) or [1, 3, H, W] (NCHW)
+  const chw = ishape[1] === 3 && ishape[3] !== 3;
+  const size = chw ? ishape[2] : ishape[1];
+  const [output] = await model.run([toInputTensor(image, size, chw)]);
   const data = new Float32Array(output);
 
   // YOLO11 output is [1, 4 + numClasses, numBoxes] (or transposed).
@@ -62,6 +70,7 @@ export async function detect(model: TfliteModel, image: Image): Promise<Detectio
       candidates.push({ box: [at(i, 0), at(i, 1), at(i, 2), at(i, 3)], cls, score });
     }
   }
+
 
   // Per-class non-max suppression
   candidates.sort((a, b) => b.score - a.score);
